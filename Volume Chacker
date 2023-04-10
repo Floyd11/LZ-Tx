@@ -1,0 +1,79 @@
+WITH liquidity_providers AS (
+SELECT
+    t."date",
+    t."liquidity_provider",
+    t."contract_address",
+    SUM(t."amountLP") / POW(10, 6) AS liquidity
+FROM (
+    SELECT 
+        DATE_TRUNC('DAY', "evt_block_time") AS date,
+        "to" AS liquidity_provider,
+        "contract_address",
+        "amountLP"
+    FROM stargate."Pool_evt_Mint"
+    
+    UNION ALL 
+    
+    SELECT
+        DATE_TRUNC('DAY', "evt_block_time") AS date,
+        "from" AS liquidity_provider,
+        "contract_address",
+        -"amountLP"
+    FROM stargate."Pool_evt_Burn"
+    ) AS t
+GROUP BY t."date", t."liquidity_provider", t."contract_address"
+),
+
+liquidity_provider_balance AS (
+SELECT
+    "date",
+    "liquidity_provider",
+    "contract_address",
+    SUM("liquidity") OVER (PARTITION BY "liquidity_provider", "contract_address" ORDER BY date) AS total_liquidity,
+    LEAD("date", 1, NOW()) OVER (PARTITION BY "liquidity_provider", "contract_address" ORDER BY date) AS next_date
+FROM liquidity_providers
+),
+
+daily_series AS (
+SELECT GENERATE_SERIES('2022-03-17'::date, NOW(), INTERVAL '1 day') AS date
+),
+
+lp_daily_balance AS (
+SELECT
+    d."date",
+    lp."liquidity_provider",
+    lp."contract_address",
+    lp."total_liquidity"
+FROM daily_series AS d
+INNER JOIN liquidity_provider_balance AS lp ON lp."date" <= d."date" AND lp."next_date" > d."date"
+),
+
+temp AS (
+SELECT
+    "date",
+    CASE
+        WHEN "contract_address" = '\x38ea452219524bb87e18de1c24d3bb59510bd783' THEN 'USDT'
+        WHEN "contract_address" = '\xdf0770df86a8034b3efef0a1bb3c889b8332ff56' THEN 'USDC'
+    END AS token,
+    COUNT(DISTINCT "liquidity_provider") AS liquidity_providers
+FROM lp_daily_balance
+WHERE "total_liquidity" > 0
+GROUP BY date, token
+ORDER BY date DESC
+),
+
+total AS (
+SELECT
+    "date",
+    SUM(liquidity_providers) AS total_lp
+FROM temp
+GROUP BY 1
+)
+
+SELECT
+    temp."date",
+    token,
+    liquidity_providers,
+    total_lp
+FROM temp
+LEFT JOIN total ON total."date" = temp."date"
